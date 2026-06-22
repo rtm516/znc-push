@@ -59,7 +59,7 @@ class CPushSocket : public CSocket
 		}
 
 		// Implemented after CPushMod
-		void Request(bool post, const CString& host, const CString& url, MCString& parameters, const CString& auth="");
+		void Request(bool post, const CString& host, const CString& url, MCString& parameters, const CString& auth="", MCString headers=MCString());
 		virtual void ReadLine(const CString& data);
 		virtual void Disconnected();
 
@@ -80,7 +80,7 @@ long make_curl_request(const CString& service_host, const CString& service_url,
 						   const CString& service_auth, MCString& params, int port,
 						   bool use_ssl, bool use_post,
 						   const CString& proxy, bool proxy_ssl_verify,
-						   bool debug);
+						   bool debug, MCString& headers);
 #endif // USE_CURL
 
 /**
@@ -298,6 +298,7 @@ class CPushMod : public CModule
 			CString service_url;
 			CString service_auth;
 			MCString params;
+			MCString headers;
 
 			// Service-specific profiles
 			if (service == "pushbullet")
@@ -591,6 +592,75 @@ class CPushMod : public CModule
 					params["parse_mode"] = "HTML";
 				}
 			}
+			else if (service == "gotify")
+			{
+				if (options["secret"] == "")
+				{
+					PutModule("Error: secret (Gotify app token) not set");
+					return;
+				}
+				if (options["message_uri"] == "")
+				{
+					PutModule("Error: message_uri not set (e.g. https://gotify.example.com)");
+					return;
+				}
+
+				CString::size_type count;
+				VCString parts;
+				CString url = options["message_uri"];
+
+				// Verify that the URL begins with either http:// or https://
+				count = url.Split("://", parts, false);
+
+				if (count != 2)
+				{
+					PutModule("Error: invalid url format");
+					return;
+				}
+
+				if (parts[0] == "https")
+				{
+					use_ssl = true;
+					use_port = 443;
+				}
+				else if (parts[0] == "http")
+				{
+					use_ssl = false;
+					use_port = 80;
+				}
+				else
+				{
+					PutModule("Error: invalid url schema");
+					return;
+				}
+
+				// Split out the host and optional port number
+				url = parts[1];
+				CString host = url.Token(0, false, "/");
+				count = host.Split(":", parts, false);
+
+				if (count > 1)
+				{
+					use_port = parts[1].ToInt();
+				}
+
+				service_host = parts[0];
+				service_url = "/message";
+
+				use_post = true;
+
+				// Token goes in a header, not the query string or body,
+				// so it survives proxies such as Cloudflare.
+				headers["X-Gotify-Key"] = options["secret"];
+
+				params["title"] = message_title;
+				params["message"] = message_content;
+
+				if (options["message_priority"] != "")
+				{
+					params["priority"] = options["message_priority"];
+				}
+			}
 			else
 			{
 				PutModule("Error: service type not selected");
@@ -607,7 +677,7 @@ class CPushMod : public CModule
 
 #ifdef USE_CURL
 			PutDebug("using libcurl");
-			long http_code = make_curl_request(service_host, service_url, service_auth, params, use_port, use_ssl, use_post, options["proxy"], options["proxy_ssl_verify"] != "no", options["debug"] == "on");
+			long http_code = make_curl_request(service_host, service_url, service_auth, params, use_port, use_ssl, use_post, options["proxy"], options["proxy_ssl_verify"] != "no", options["debug"] == "on", headers);
 			PutDebug("curl: HTTP status code " + CString(http_code));
 			if (!(http_code >= 200 && http_code < 300)) {
 				PutModule("Error: HTTP status code " + CString(http_code));
@@ -617,7 +687,7 @@ class CPushMod : public CModule
 			// Create the socket connection, write to it, and add it to the queue
 			CPushSocket *sock = new CPushSocket(this);
 			sock->Connect(service_host, use_port, use_ssl);
-			sock->Request(use_post, service_host, service_url, params, service_auth);
+			sock->Request(use_post, service_host, service_url, params, service_auth, headers);
 			AddSocket(sock);
 #endif
 		}
@@ -1352,6 +1422,10 @@ class CPushMod : public CModule
 						{
 							PutModule("Note: Telegram requires setting both the 'secret' (api key) and 'target' (chat_id)");
 						}
+						else if (value == "gotify")
+						{
+							PutModule("Note: Gotify requires setting 'secret' (app token) and 'message_uri' (e.g. https://gotify.example.com)");
+						}
 						else
 						{
 							PutModule("Error: unknown service name");
@@ -1710,16 +1784,21 @@ CString build_query_string(MCString& params)
  * @param port Port number
  * @param use_ssl Use SSL
  * @param use_post Use POST method
+ * @param proxy Proxy server
+ * @param proxy_ssl_verify Verify SSL for proxy
+ * @param debug Enable debug mode
+ * @param headers Additional request headers
  */
 long make_curl_request(const CString& service_host, const CString& service_url,
 						   const CString& service_auth, MCString& params, int port,
 						   bool use_ssl, bool use_post,
 						   const CString& proxy, bool proxy_ssl_verify,
-						   bool debug)
+						   bool debug, MCString& headers)
 {
 	CURL *curl;
 	CURLcode result;
 	long http_code;
+	struct curl_slist *header_list = NULL;
 
 	curl = curl_easy_init();
 
@@ -1751,6 +1830,16 @@ long make_curl_request(const CString& service_host, const CString& service_url,
 		curl_easy_setopt(curl, CURLOPT_USERPWD, service_auth.data());
 	}
 
+	for (MCString::iterator h = headers.begin(); h != headers.end(); h++)
+	{
+		CString line = h->first + ": " + h->second;
+		header_list = curl_slist_append(header_list, line.c_str());
+	}
+	if (header_list)
+	{
+		curl_easy_setopt(curl, CURLOPT_HTTPHEADER, header_list);
+	}
+
 	if (use_post)
 	{
 		curl_easy_setopt(curl, CURLOPT_POST, 1);
@@ -1768,11 +1857,13 @@ long make_curl_request(const CString& service_host, const CString& service_url,
 
 	result = curl_easy_perform(curl);
 	if (result != CURLE_OK) {
+		if (header_list) curl_slist_free_all(header_list);
 		curl_easy_cleanup(curl);
 		return -1;
 	}
 
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+	if (header_list) curl_slist_free_all(header_list);
 	curl_easy_cleanup(curl);
 
 	return http_code;
@@ -1788,8 +1879,9 @@ long make_curl_request(const CString& service_host, const CString& service_url,
  * @param url Resource path
  * @param parameters Query parameters
  * @param auth Basic authentication string
+ * @param headers Additional request headers
  */
-void CPushSocket::Request(bool post, const CString& host, const CString& url, MCString& parameters, const CString& auth)
+void CPushSocket::Request(bool post, const CString& host, const CString& url, MCString& parameters, const CString& auth, MCString headers)
 {
 	parent->PutDebug("Building notification to " + host + url + "...");
 
@@ -1819,6 +1911,12 @@ void CPushSocket::Request(bool post, const CString& host, const CString& url, MC
 		CString auth_b64 = auth.Base64Encode_n();
 		request += "Authorization: Basic " + auth_b64 + crlf;
 		parent->PutDebug("Authorization: Basic " + auth_b64);
+	}
+
+	for (MCString::iterator h = headers.begin(); h != headers.end(); h++)
+	{
+		request += h->first + ": " + h->second + crlf;
+		parent->PutDebug(h->first + ": " + h->second);
 	}
 
 	request += crlf;

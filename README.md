@@ -19,6 +19,7 @@ conditions.  ZNC Push current supports the following services:
 * [Slack][]
 * [Discord][]
 * [Igloo][]
+* [Gotify][]
 * Custom URL GET requests
 
 This project is still a Work In Progress, but should be functional enough and stable enough
@@ -232,6 +233,7 @@ to something similar to "http://domain/#channel/2011-03-09 14:25:09", or
     *   `slack`
     *   `discord`
     *   `igloo`
+    *   `gotify`
     *   `url`
 
 *   `username` Default: ` `
@@ -524,6 +526,7 @@ from me and not from my employer.  See the `LICENSE` file for details.
 [Slack]: https://slack.com/
 [Discord]: https://discord.gg
 [Igloo]: https://iglooirc.com/
+[Gotify]: https://gotify.net/
 
 [faq]: https://github.com/amyreese/znc-push/blob/master/doc/faq.md
 [examples]: https://github.com/amyreese/znc-push/blob/master/doc/examples.md
